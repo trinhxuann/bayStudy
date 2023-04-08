@@ -1,0 +1,202 @@
+---
+title: Seabird investigation
+output:
+  html_document:
+    code_folding: hide
+---
+
+<!-- Changing things to be at least 12 pt font -->
+<style type="text/css">
+  body{
+  font-size: 12pt;
+}
+</style>
+
+```{r setup, include=FALSE}
+# Loading libraries
+
+library(kableExtra)
+library(dplyr)
+library(ggplot2)
+library(oce)
+library(lubridate)
+
+options(scipen = 999, width = 80)
+
+knitr::opts_chunk$set(dpi=320, fig.width=18, fig.height=14, warning=FALSE, message=F, 
+                      dev.args = list(pointsize = 13))
+```
+
+# Purpose
+
+This script provides the infrastructure to process the raw seabird data files into a usable format for the Bay Study.
+
+# Method
+
+## Data outputs
+
+The seabird instrument is a CTD (a file recording **C**onductivity, **T**emperature, and **D**epth data) represented as two types of data files, a `.cnv` and a `.hex` file. Both can be opened in a text editor and both contains data related to the cast. According to Jillian, the seabird has proprietary software that converts the `.hex` file into a `.cnv` file that contains the tabular data. Therefore, the script will only focus on the `.cnv` file going forward. 
+
+## Reading in the data
+
+Data is read via the `read.ctd.sbe` function as part of the `oce` package. This function is specific **only** to a Seabird CTD file output. Alternatively, the `read.ctd` function can be used if users are not sure what instrument the CTD file (has overhead code to check which instrument the CTD comes from). Although the `.cnv` file is a text file and can be simply read as such, the main advantages of the `read.ctd.sbe` file is two folds: 1) metadata is automatically populated and 2) pressure is calculated from the depth, condutivity, and temperature data. Since I have yet to explore the relationships between pressure, depth, conductivity, and temperature to confirm a linear relationship, it is simply easier to use the `read.ctd.sbe` function to access the pressure data.
+
+```{r reading in the data}
+# Specify the month, year, and total number of casts
+# A cast is defined as a deployment of the Seabird into the water to collect data. Theoretically, there is one cast per station.
+
+# Function to read in the seabird data
+# Make sure you're connected to VPN if this is on the U drive
+read_seabird <- function(year, month,
+                         path = "U:\\LTM\\Bay Study\\SeaBird\\Data") {
+  # Does the path exist?
+  if (!file.exists(path)) stop("Make sure the file path exists.", call. = F)
+  
+  if (missing(year)) {
+    message("Pick a year:")
+    return(print(list.files(path)))
+  }
+  
+  if (missing(month)) {
+    message("Pick a month:")
+    return(print(list.files(file.path(path, year))))
+  }
+  
+  # List of files in the designated year and month
+  files <- list.files(file.path(path, year, month), pattern = "*.cnv", full.names = TRUE)
+  # Reading in all the files. Will return a list
+  lapply(files, function(x) {
+    # Pulling the cast name from the file name, which is the values between the month, year, and .cnv strings
+    castName <- gsub(paste0(".*/", year, "/", month, "/", month, year, "(\\d+)\\.cnv"), "\\1", x)
+    
+    oce::read.ctd.sbe(x, station = castName)
+  }) %>% 
+    setNames(gsub(".*/(.*)\\.cnv", "\\1", files))
+}
+
+# Actually read it in
+seabirdCtdJan23 <- read_seabird(2023, "January")
+# Do this across ALL the casts in that file
+seabirdJan23 <- lapply(seabirdCtdJan23, function(x) {
+  slot(x, "data") %>% 
+    data.frame() %>% 
+    mutate(cast = x@metadata$station,
+           startTime = force_tz(x@metadata$startTime, tzone = "America/Los_Angeles"),
+           month = format(startTime, format = "%m"),
+           depthBin = cut(depth, 
+                          breaks = c(0, seq(0.7, ceiling(max(depth)) + 0.2, by = 0.5)),
+                          labels = seq(0.5, ceiling(max(depth)), by = 0.5)))
+})
+```
+
+## Isolating the downcast portion of the data
+
+The seabird is initially soaked at the top of the water surface before being cast down into the water. The seabird logs data throughout this period, but we would like to only grab data from when it is descending the water column. We can use a breakpoint analysis to find this segment during each cast. A breakpoint analysis involves fitting a model that fits several linear models across the data; the connections between these individual lines represents the breakpoints, from which we can leverage to isolate the downcast. The model trains on the pressure value and is given the freedom to iterate up to a max number of 5 breakpoints. This value, `Kmax`, can be changed but initial analysis shows that 5 works well.
+
+```{r downcast}
+library(segmented)
+
+# Fit the model, extract the breakpoints and various fit metrics
+breakpointsSelect <- lapply(seabirdJan23, 
+                            function(x) {
+                              
+                              x <<- x
+                              lmMod <- lm(pressure ~ scan, data = x)
+                              
+                              # Change Kmax if needed
+                              fitSegmented <- tryCatch(selgmented(lmMod, type = "bic", Kmax = 5),
+                                                       error = function(cond) {
+                                                         warning(cond, 
+                                                                 call. = F)
+                                                       })
+                              
+                              rsme <- sqrt(mean((x$pressure - fitSegmented$fitted.values)^2))
+                              breakpoints <- fitSegmented$psi[, 2]
+                              
+                              p <- function(y) {
+                                plot(fitSegmented)
+                                points(x[, c("scan", "pressure")])
+                                abline(v = breakpoints, col = "#FF4D00")
+                              }
+                              
+                              # Return this
+                              list(data = x,
+                                   mod = fitSegmented,
+                                   rsme = rsme,
+                                   breakpoints = breakpoints,
+                                   plot = function(){p(fitSegmented)})
+                            }) %>% 
+  setNames(names(seabirdJan23))
+```
+
+This analysis yields several breakpoints per cast, and we must isolate the downcast manually.
+
+```{r example of plot}
+# An example of the breakpoints fit
+breakpointsSelect[[1]]$plot()
+```
+
+To do this, there are several filters that are used: these filters are preliminary and should be adjusted over time as this approach is adopted
+
+1. the max depth designates the end of the downcast (the first instance if there are multiple instances of the same max depth)
+2. the beginning of the downcast must be at least 10 scans before the max depth
+3. the difference between the depth of the scan at the beginning of the downcast with the depth of the scan 10 instances later is less than -1.
+
+Data in between this beginning and ending scan are isolated as the downcast.
+
+```{r isolating the downcast}
+downcastBreakpoints <- lapply(breakpointsSelect,
+       function(x) {
+         x$data %>% 
+           mutate(breakpoints = ifelse(row_number() %in% round(x$breakpoints), 
+                                           scan, NA),
+                      maxDepth = ifelse(depth == max(depth, na.rm = T), scan, NA),
+                  fromMax = scan - max(maxDepth, na.rm = T),
+                  slope = depth - lead(depth, 15),
+                  bookEndDowncast = ifelse(!is.na(maxDepth) | (!is.na(breakpoints) & fromMax < -10 & slope < -1) &
+                                             scan <= first(which(depth == max(depth, na.rm = T))),
+                                           T, F)) %>% 
+           filter(between(scan, first(which(bookEndDowncast == T)), last(which(bookEndDowncast == T))))
+       })
+```
+
+We can quicky check to see if each cast has correctly isolated only the downcast (increasing depth):
+
+```{r plotting the downcast}
+downcastBreakpoints %>% 
+  bind_rows(.id = "cast") %>% 
+  ggplot(aes(scan, pressure)) +
+  geom_line() +
+  facet_wrap(~cast, scales = "free")
+```
+
+## Binding each cast to the station
+
+This requires an input file that lists the date, cast, time, and station taken from the seabird datasheet. This information is joined to the seabird data to assign the station to the downcast data.
+
+```{r joining with the station medata}
+stationCast <- read.csv(file.path("SeabirdLogJan-Mar2023.csv")) %>%
+  group_by(Station) %>% 
+  transmute(startTimeLog = as.POSIXct(paste0(Date, " ", ifelse(nchar(Time) == 3, paste0("0", Time), Time)), 
+                                   format = "%m/%d/%Y %H%M"),
+            month = format(as.Date(Date, format = "%m/%d/%Y"), format = "%m"),
+            cast = Cast, Station, rep = 1:n(), Depth, Comments) %>% 
+  right_join(downcastBreakpoints %>% 
+               bind_rows(.id = "fileName") %>% 
+               mutate(cast = as.integer(cast)),
+             by = c("month", "cast")) %>% 
+  group_by(cast = factor(cast), Station = factor(Station)) %>% 
+  mutate(timeDifference = as.numeric(difftime(startTime, startTimeLog, units = "mins")))
+```
+
+Although the recorded cast number is generally correct, we can use the difference between start time recorded on the datasheet against on the seabird to make sure that we have correct matches.
+
+```{r plotting time difference}
+distinct(stationCast, cast, rep, Station, timeDifference) %>% 
+  ggplot(aes(factor(Station), timeDifference, color = factor(rep, levels = 1:3))) +
+  geom_point(size = 5) +
+  expand_limits(y = 0) +
+  labs(x = "Station", y = "Time Difference (min)", color = "Rep") +
+  theme_bw(base_size = 24) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```

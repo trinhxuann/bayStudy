@@ -1,14 +1,15 @@
 library(oce)
-library(ocedata)
+# library(ocedata)
 library(tidyverse)
 library(lubridate)
-
+library(dplyr)
 
 # load data ---------------------------------------------------------------
 
 ## ID month and year you are working with
 month <- "January"
 year <- 2023
+# cast per station, i.e., 52 stations ideally. So there should be 52 files
 casts <- 52
 
 ## determine path
@@ -61,6 +62,8 @@ starttimes <- df %>%
 
 ## use shiny to enter data to table
 
+# Start time should match the start time of the tow per station.
+
 ## save csv to match station using seabird log, when matched re-save with same name
 path2 <- paste(pathname, "\\StartTimesForMatch_", month, year, ".csv", sep = "")
 write_csv(starttimes, file = path2)
@@ -68,13 +71,13 @@ write_csv(starttimes, file = path2)
 ## read in matched cast/station
 
 matched <- read_csv(path2) %>% 
-  select(name, station)
+  select(name, startTime)
 
 ## add station to profile data
 ## LEFT OFF HERE TRYING TO DO ROUNDED DEPTH AND DEPTH BIN
 cleanprofiles <- profiles %>% 
-  left_join(matched, by = "name") %>% 
-  filter(!station == 999) 
+  left_join(matched, by = "name")
+  # filter(!station == 999) 
 #%>% 
   # mutate(roundedDepth = cut(depth, breaks = c(0, 0.7, 1.2, 1.7, 2.2, 2.7, 3.2, 3.7), 
   #                           #labels = c("0.5", "1", "1.5", "2", "2.5", "3", "3.5")
@@ -87,9 +90,10 @@ write_csv(cleanprofiles, path3)
 ## plot
 
 cleanprofiles %>% 
-  ggplot(aes(x=temperature, y=depth, color = as.factor(station))) +
+  ggplot(aes(x=temperature, y=depth)) +
   geom_point() +
-  scale_y_reverse()
+  scale_y_reverse() +
+  facet_wrap(~name)
 
 
 
