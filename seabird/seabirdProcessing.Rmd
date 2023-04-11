@@ -45,8 +45,9 @@ Data is read via the `read.ctd.sbe` function as part of the `oce` package. This 
 # Specify the month, year, and total number of casts
 # A cast is defined as a deployment of the Seabird into the water to collect data. Theoretically, there is one cast per station.
 
-# Function to read in the seabird data
 # Make sure you're connected to VPN if this is on the U drive
+
+# Function to read in the seabird data
 read_seabird <- function(year, month,
                          path = "U:\\LTM\\Bay Study\\SeaBird\\Data") {
   # Does the path exist?
@@ -110,21 +111,25 @@ breakpointsSelect <- lapply(seabirdJan23,
                                                                  call. = F)
                                                        })
                               
-                              rsme <- sqrt(mean((x$pressure - fitSegmented$fitted.values)^2))
-                              breakpoints <- fitSegmented$psi[, 2]
-                              
-                              p <- function(y) {
+                            if (!isTRUE(is.character(fitSegmented))) {
+                            rsme <- sqrt(mean((x$pressure - fitSegmented$fitted.values)^2))
+                            breakpoints <- fitSegmented$psi[, 2]
+                            
+                            p <- function(y) {
                                 plot(fitSegmented)
                                 points(x[, c("scan", "pressure")])
                                 abline(v = breakpoints, col = "#FF4D00")
-                              }
-                              
-                              # Return this
-                              list(data = x,
-                                   mod = fitSegmented,
-                                   rsme = rsme,
-                                   breakpoints = breakpoints,
-                                   plot = function(){p(fitSegmented)})
+                            }
+                            
+                            # Return this
+                            list(data = x,
+                                 mod = fitSegmented,
+                                 plot = function(){p(fitSegmented)},
+                                 rsme = rsme,
+                                 breakpoints = breakpoints)
+                          } else {
+                            NULL
+                          }
                             }) %>% 
   setNames(names(seabirdJan23))
 ```
